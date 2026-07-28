@@ -68,12 +68,32 @@ python src/train.py --config configs/default.yaml --data data/synthetic --epochs
 # 5. Evaluate
 python src/evaluate.py --checkpoint models/best.pt --data data/synthetic
 
-# 6. Launch demo app
-python app/demo_app.py --checkpoint models/best.pt
+# 6. Launch demo app (auto-downloads pretrained checkpoint if missing)
+python app/demo_app.py
 
 # 7. Run tests
 pytest tests/ -v
 ```
+
+## Pretrained Models
+
+Pretrained checkpoints are hosted on Hugging Face Hub. The demo app auto-downloads them if a local checkpoint is missing.
+
+### Manual download
+
+```bash
+python scripts/download_models.py
+```
+
+Models land in `models/` — ready for evaluation, demo, or fine-tuning.
+
+### Upload your own
+
+```bash
+hf upload your-username/melanoma-cbm models/ .
+```
+
+Then update `HF_REPO` in `scripts/download_models.py` and `app/demo_app.py`.
 
 ## Training with Real Data
 
@@ -113,6 +133,7 @@ melanoma-cbm/
 ├── scripts/
 │   ├── download_ham10000.py
 │   ├── download_pad_ufes20.py
+│   ├── download_models.py
 │   ├── generate_synthetic_data.py
 │   └── precompute_abcd_targets.py
 ├── src/
@@ -142,7 +163,7 @@ melanoma-cbm/
 │   ├── test_model_shapes.py
 │   └── test_constraints.py
 └── notebooks/
-    └── walkthrough.ipynb
+    └── walkthrough.py
 ```
 
 ## Key Features

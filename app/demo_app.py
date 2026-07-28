@@ -4,6 +4,9 @@
 Upload a dermoscopic image → See ABCD concept scores, attention heatmap,
 disease diagnosis, and malignancy risk assessment.
 
+Auto-downloads pretrained checkpoints from Hugging Face Hub if no local
+checkpoint is found.
+
 **DISCLAIMER: For research and educational use only. Not a diagnostic device.
 Not for clinical decision-making.**
 """
@@ -29,7 +32,6 @@ from src.utils.viz import (
 )
 from src.data.datasets import CLASS_NAMES
 
-
 DISCLAIMER = (
     "**DISCLAIMER**: For research and educational use only. "
     "Not a diagnostic device. Not for clinical decision-making. "
@@ -43,6 +45,40 @@ RISK_COLORS = {
     "VERY HIGH": "#e74c3c",
 }
 
+HF_REPO = "karanm777/melanoma-cbm"
+
+
+def _resolve_checkpoint(checkpoint_path):
+    """Resolve checkpoint path, downloading from HF Hub if missing."""
+    ckpt = Path(checkpoint_path) if checkpoint_path else None
+
+    if ckpt and ckpt.exists():
+        return str(ckpt)
+
+    if ckpt and not ckpt.exists():
+        print(f"Local checkpoint not found: {ckpt}")
+    else:
+        print("No checkpoint provided.")
+
+    print(f"Downloading from Hugging Face Hub: {HF_REPO}...")
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_REPO,
+            filename="best.pt",
+            local_dir="models",
+            local_dir_use_symlinks=False,
+        )
+        print(f"Downloaded: {path}")
+        return path
+    except ImportError:
+        print("huggingface_hub not installed. Run: pip install huggingface_hub")
+    except Exception as e:
+        print(f"Download failed: {e}")
+
+    print("WARNING: Using untrained model weights. Results will be random.")
+    return None
+
 
 def load_model(checkpoint_path, config_path="configs/default.yaml"):
     with open(config_path, "r") as f:
@@ -54,12 +90,15 @@ def load_model(checkpoint_path, config_path="configs/default.yaml"):
                            "mps" if torch.backends.mps.is_available() else "cpu")
 
     model = CBMModel(model_cfg).to(device)
-    if checkpoint_path and Path(checkpoint_path).exists():
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    ckpt = _resolve_checkpoint(checkpoint_path)
+    if ckpt:
+        checkpoint = torch.load(ckpt, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
-        print(f"Model loaded from {checkpoint_path}")
+        print(f"Model loaded successfully.")
     else:
-        print("WARNING: No checkpoint provided or found. Using untrained model weights.")
+        print("WARNING: No checkpoint found. Using random weights.")
+
     model.eval()
     return model, device
 
@@ -117,17 +156,13 @@ def predict(image, model, device):
     return pred_fig, concept_chart, diagnosis_text
 
 
-def create_demo():
-    model, device = load_model(None)
-
+def create_demo(model, device):
     with gr.Blocks(title="CBM Melanoma Analysis", theme=gr.themes.Soft()) as demo:
         gr.Markdown(
             "# Clinically Interpretable Melanoma Diagnosis and Malignancy Risk Assessment\n"
             "### Concept Bottleneck Model (CBM) with EfficientNetV2-S"
         )
-        gr.Markdown(
-            f"**{DISCLAIMER}**"
-        )
+        gr.Markdown(f"**{DISCLAIMER}**")
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -174,20 +209,15 @@ def create_demo():
 
 def main():
     parser = argparse.ArgumentParser(description="CBM Melanoma Analysis Demo")
-    parser.add_argument("--checkpoint", default=None, help="Path to model checkpoint")
+    parser.add_argument("--checkpoint", default=None,
+                        help="Path to model checkpoint (auto-downloads from HF Hub if missing)")
     parser.add_argument("--port", type=int, default=7860, help="Port for the demo app")
     args = parser.parse_args()
 
-    global model, device
-    if args.checkpoint:
-        model, device = load_model(args.checkpoint)
-    else:
-        model, device = load_model(None)
-
-    demo = create_demo()
+    model, device = load_model(args.checkpoint)
+    demo = create_demo(model, device)
     demo.launch(server_port=args.port, share=False)
 
 
 if __name__ == "__main__":
-    model, device = None, None
     main()
