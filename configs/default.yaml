@@ -1,0 +1,91 @@
+# ---------------------------------------------------------------------------
+# CBM-Neuro — Default Configuration
+# ---------------------------------------------------------------------------
+# All hyperparameters live here — no magic numbers in code.
+
+# --- Project ---
+project_name: "melanoma_cbm"
+seed: 42
+device: "auto"  # "auto", "cuda", "cpu", "mps"
+
+# --- Data ---
+data:
+  synthetic_dir: "data/synthetic"
+  ham10000_dir: "data/ham10000"
+  pad_ufes20_dir: "data/pad_ufes20"
+  abcd_cache_dir: "data/abcd_cache"
+  img_size: 224
+  batch_size: 32
+  num_workers: 4
+  train_split: 0.70
+  val_split: 0.15
+  test_split: 0.15
+
+# --- Augmentation ---
+augmentation:
+  horizontal_flip_prob: 0.5
+  vertical_flip_prob: 0.3
+  rotation_limit: 15
+  brightness_limit: 0.2
+  contrast_limit: 0.2
+  hue_shift_limit: 10
+  sat_shift_limit: 20
+
+# --- Model ---
+model:
+  backbone: "efficientnetv2_rw_s"
+  pretrained: true
+  global_dim: 1280
+  concept_dim: 4
+  num_classes: 7
+  malignant_classes: ["mel", "bcc", "akiec"]
+  classes: ["mel", "nv", "bcc", "akiec", "bkl", "df", "vasc"]
+  dropout_rate: 0.3
+  attention_mode: "sigmoid"  # "sigmoid" or "softmax"
+
+# --- Training ---
+training:
+  epochs: 60
+  backbone_lr: 0.00001
+  head_lr: 0.001
+  weight_decay: 0.0001
+  lr_scheduler: "cosine"
+  early_stop_patience: 15
+  grad_clip_norm: 1.0
+
+# --- Loss weights ---
+loss:
+  lambda_concept: 0.5
+  lambda_constraint: 0.1
+
+# --- Clinical Constraints ---
+constraints:
+  concept_high: 0.6
+  concept_low: 0.3
+  diameter_mm_threshold: 6.0
+  alpha1: 0.6
+  alpha2: 0.6
+  alpha3: 0.7
+  diameter_max_mm: 20.0
+
+# --- Risk Bucketing ---
+risk:
+  thresholds:
+    LOW: 0.0
+    MODERATE: 0.25
+    HIGH: 0.50
+    VERY_HIGH: 0.75
+
+# --- Logging ---
+logging:
+  log_dir: "runs"
+  checkpoint_dir: "models"
+  tensorboard: true
+  log_interval: 10
+
+# --- Evaluation ---
+evaluation:
+  n_bootstrap: 1000
+  ece_n_bins: 10
+  export_viz: false
+  viz_output_dir: "runs/viz_output"
