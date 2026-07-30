@@ -12,6 +12,7 @@ import argparse
 import random
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -51,7 +52,19 @@ def load_config(config_path):
         return yaml.safe_load(f)
 
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, num_epochs, writer=None, log_interval=10):
+def train_one_epoch(
+    model,
+    dataloader,
+    criterion,
+    optimizer,
+    device,
+    epoch,
+    num_epochs,
+    writer=None,
+    log_interval=10,
+    scaler=None,
+    use_amp=False,
+):
     model.train()
     running = {
         "total": 0.0, "diagnosis": 0.0, "concept": 0.0,
@@ -68,14 +81,23 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, num_
         abcd = batch["abcd_targets"].to(device)
 
         optimizer.zero_grad(set_to_none=True)
-        outputs = model(images)
+        amp_context = torch.amp.autocast("cuda") if use_amp else nullcontext()
+        with amp_context:
+            outputs = model(images)
 
-        target_dict = {"label": labels, "abcd_targets": abcd}
-        loss_dict = criterion(outputs, target_dict)
+            target_dict = {"label": labels, "abcd_targets": abcd}
+            loss_dict = criterion(outputs, target_dict)
 
-        loss_dict["total"].backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        if scaler is not None and use_amp:
+            scaler.scale(loss_dict["total"]).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss_dict["total"].backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
 
         for k in running:
             running[k] += loss_dict[k].item() * images.size(0)
@@ -103,7 +125,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, num_
 
 
 @torch.no_grad()
-def validate(model, dataloader, criterion, device):
+def validate(model, dataloader, criterion, device, use_amp=False):
     model.eval()
     running = {
         "total": 0.0, "diagnosis": 0.0, "concept": 0.0,
@@ -117,9 +139,11 @@ def validate(model, dataloader, criterion, device):
         labels = batch["label"].to(device)
         abcd = batch["abcd_targets"].to(device)
 
-        outputs = model(images)
-        target_dict = {"label": labels, "abcd_targets": abcd}
-        loss_dict = criterion(outputs, target_dict)
+        amp_context = torch.amp.autocast("cuda") if use_amp else nullcontext()
+        with amp_context:
+            outputs = model(images)
+            target_dict = {"label": labels, "abcd_targets": abcd}
+            loss_dict = criterion(outputs, target_dict)
 
         for k in running:
             running[k] += loss_dict[k].item() * images.size(0)
@@ -137,22 +161,37 @@ def main():
     parser.add_argument("--data", default="data/synthetic")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr-backbone", type=float, default=None)
     parser.add_argument("--lr-head", type=float, default=None)
     parser.add_argument("--lambda-concept", type=float, default=None)
     parser.add_argument("--lambda-constraint", type=float, default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--disable-early-stop", action="store_true",
+                        help="Train through the requested epoch count without early stopping")
+    parser.add_argument("--disable-amp", action="store_true",
+                        help="Disable CUDA automatic mixed precision")
+    parser.add_argument("--disable-cudnn", action="store_true",
+                        help="Disable cuDNN kernels for CUDA debugging/stability")
+    parser.add_argument("--freeze-encoder", action="store_true",
+                        help="Freeze the image encoder and train only the heads")
+    parser.add_argument("--skip-validation", action="store_true",
+                        help="Skip validation and save latest checkpoints after training epochs")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     set_seed(cfg["seed"])
+
+    if args.disable_cudnn:
+        torch.backends.cudnn.enabled = False
 
     device = get_device(args.device or cfg["device"])
     print(f"Device: {device}")
 
     epochs = args.epochs or cfg["training"]["epochs"]
     batch_size = args.batch_size or cfg["data"]["batch_size"]
+    num_workers = args.num_workers if args.num_workers is not None else cfg["data"]["num_workers"]
     lambda_concept = args.lambda_concept or cfg["loss"]["lambda_concept"]
     lambda_constraint = args.lambda_constraint or cfg["loss"]["lambda_constraint"]
 
@@ -160,6 +199,10 @@ def main():
     model_cfg["img_size"] = cfg["data"]["img_size"]
 
     model = CBMModel(model_cfg).to(device)
+    if args.freeze_encoder:
+        for param in model.encoder.parameters():
+            param.requires_grad = False
+        cfg["training"]["freeze_encoder"] = True
     print(f"Model built. Total params: {sum(p.numel() for p in model.parameters()):,}")
 
     train_dataset = load_synthetic_dataset(
@@ -175,9 +218,9 @@ def main():
         seed=cfg["seed"],
     )
     train_loader = get_dataloader(train_dataset, batch_size=batch_size, shuffle=True,
-                                  num_workers=cfg["data"]["num_workers"])
+                                  num_workers=num_workers)
     val_loader = get_dataloader(val_dataset, batch_size=batch_size, shuffle=False,
-                                num_workers=cfg["data"]["num_workers"])
+                                num_workers=num_workers)
     print(f"Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples")
 
     classes = model_cfg.get("classes", ["mel", "nv", "bcc", "akiec", "bkl", "df", "vasc"])
@@ -216,9 +259,11 @@ def main():
     optimizer = optim.AdamW([
         {"params": backbone_params, "lr": backbone_lr},
         {"params": head_params, "lr": head_lr},
-    ], weight_decay=weight_decay)
+    ], weight_decay=weight_decay, foreach=False)
 
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-7)
+    use_amp = device.type == "cuda" and not args.disable_amp
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     log_dir = Path(cfg["logging"]["log_dir"]) / f"run_{int(time.time())}"
     writer = SummaryWriter(log_dir)
@@ -227,25 +272,56 @@ def main():
 
     log_interval = cfg["logging"]["log_interval"]
     patience = cfg["training"]["early_stop_patience"]
+    if args.disable_early_stop:
+        patience = None
 
     best_val_loss = float("inf")
     epochs_no_improve = 0
+    start_epoch = 1
+
+    if args.checkpoint:
+        checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        if "optimizer_state_dict" in checkpoint and not args.freeze_encoder:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        elif args.freeze_encoder:
+            print("Skipping optimizer state because encoder is frozen")
+        if "scaler_state_dict" in checkpoint and not args.disable_amp:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        checkpoint_epoch = int(checkpoint.get("epoch", 0))
+        start_epoch = checkpoint_epoch + 1
+        best_val_loss = float(checkpoint.get("best_val_loss", checkpoint.get("val_loss", best_val_loss)))
+        print(f"Resumed from {args.checkpoint} at epoch {checkpoint_epoch}")
 
     print(f"\n{'='*55}")
     print(f"Training CBM for {epochs} epochs")
     print(f"  λ_concept={lambda_concept}, λ_constraint={lambda_constraint}")
     print(f"  Backbone LR={backbone_lr}, Head LR={head_lr}")
     print(f"  Malignant classes: {malignant_classes}")
+    print(f"  AMP: {use_amp}")
+    print(f"  cuDNN: {torch.backends.cudnn.enabled}")
+    print(f"  Freeze encoder: {args.freeze_encoder}")
+    print(f"  DataLoader workers: {num_workers}")
+    print(f"  Early stopping: {'disabled' if patience is None else f'patience={patience}'}")
     print(f"{'='*55}\n")
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         epoch_start = time.time()
 
         train_losses, train_acc = train_one_epoch(
             model, train_loader, criterion, optimizer, device, epoch, epochs,
-            writer=writer, log_interval=log_interval,
+            writer=writer, log_interval=log_interval, scaler=scaler, use_amp=use_amp,
         )
-        val_losses, val_acc = validate(model, val_loader, criterion, device)
+        if args.skip_validation:
+            val_losses = {
+                "total": float("inf"),
+                "diagnosis": float("inf"),
+                "concept": float("inf"),
+                "constraint_total": float("inf"),
+            }
+            val_acc = float("nan")
+        else:
+            val_losses, val_acc = validate(model, val_loader, criterion, device, use_amp=False)
 
         scheduler.step()
 
@@ -269,21 +345,28 @@ def main():
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
                 "config": cfg,
                 "val_loss": val_losses["total"],
                 "val_acc": val_acc,
+                "best_val_loss": best_val_loss,
             }, checkpoint_dir / "best.pt")
             print(f"  >> New best model saved (val_loss={best_val_loss:.4f})")
         else:
             epochs_no_improve += 1
-            if epochs_no_improve >= patience:
+            if patience is not None and epochs_no_improve >= patience:
                 print(f"\nEarly stopping at epoch {epoch}")
                 break
 
         torch.save({
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scaler_state_dict": scaler.state_dict(),
             "config": cfg,
+            "val_loss": val_losses["total"],
+            "val_acc": val_acc,
+            "best_val_loss": best_val_loss,
         }, checkpoint_dir / "latest.pt")
 
     writer.close()
