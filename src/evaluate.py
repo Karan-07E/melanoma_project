@@ -6,11 +6,16 @@ Produces a JSON report with:
   - Per-class precision, recall, F1
   - Concept prediction MAE (per concept + overall)
   - ECE and AUC for risk score
-  - Constraint violation rates (computed from model outputs)
+  - Constraint violation rates
+
+Supports Test-Time Augmentation (Strategy 2):
+  Averages predictions over multiple augmented views (flips, rotations,
+  brightness shifts) for more robust evaluation.
 
 Usage:
   python src/evaluate.py --checkpoint models/best.pt --data data/synthetic
-  python src/evaluate.py --checkpoint models/best.pt --data data/ham10000 --export-viz
+  python src/evaluate.py --checkpoint models/best.pt --data data/ham10000 --tta
+  python src/evaluate.py --checkpoint models/best.pt --data data/pad_ufes20 --tta
 """
 
 import argparse
@@ -26,7 +31,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.datasets import load_synthetic_dataset, get_dataloader
+from src.data.datasets import load_dataset, get_dataloader
 from src.models.cbm_model import CBMModel
 from src.utils.metrics import (
     compute_metrics,
@@ -47,7 +52,62 @@ def get_device():
     return torch.device("cpu")
 
 
-def evaluate(model, dataloader, cfg, device):
+def tta_predict(model, images, device, tta_transforms=None, num_aug=4):
+    """Test-Time Augmentation (TTA): average predictions over augmented views.
+
+    Strategy 2 from the domain generalization roadmap.
+
+    Args:
+        model: CBMModel instance.
+        images: (B, 3, H, W) normalized input tensor.
+        device: torch device.
+        tta_transforms: List of Albumentations transforms (or None for simple flips).
+        num_aug: Number of augmentation views (default 4).
+
+    Returns:
+        dict with averaged class_logits, risk_score, concepts.
+    """
+    model.eval()
+    B = images.size(0)
+
+    all_logits = []
+    all_risk = []
+    all_concepts = []
+
+    tta_views = []
+    for i in range(min(num_aug, 8)):
+        if i == 0:
+            tta_views.append(images)
+        elif i == 1:
+            tta_views.append(torch.flip(images, dims=[-1]))
+        elif i == 2:
+            tta_views.append(torch.flip(images, dims=[-2]))
+        elif i == 3:
+            tta_views.append(torch.rot90(images, k=1, dims=[-2, -1]))
+        elif i == 4:
+            tta_views.append(torch.flip(torch.rot90(images, k=1, dims=[-2, -1]), dims=[-1]))
+        elif i == 5:
+            tta_views.append(images + torch.randn_like(images) * 0.01)
+        elif i == 6:
+            tta_views.append(torch.flip(images, dims=[-1, -2]))
+        elif i == 7:
+            tta_views.append(torch.rot90(images, k=2, dims=[-2, -1]))
+
+    with torch.no_grad():
+        for view in tta_views:
+            out = model(view.to(device))
+            all_logits.append(out["class_logits"].cpu())
+            all_risk.append(out["risk_score"].cpu())
+            all_concepts.append(out["concepts"].cpu())
+
+    avg_logits = torch.stack(all_logits).mean(dim=0)
+    avg_risk = torch.stack(all_risk).mean(dim=0)
+    avg_concepts = torch.stack(all_concepts).mean(dim=0)
+
+    return avg_logits, avg_risk, avg_concepts
+
+
+def evaluate(model, dataloader, cfg, device, use_tta=False, tta_aug=4):
     model.eval()
 
     all_labels = []
@@ -55,6 +115,7 @@ def evaluate(model, dataloader, cfg, device):
     all_risk_scores = []
     all_concepts = []
     all_targets = []
+    all_logits_list = []
 
     violated_1_count = 0
     violated_2_count = 0
@@ -73,8 +134,20 @@ def evaluate(model, dataloader, cfg, device):
             images = batch["image"].to(device)
             labels = batch["label"]
 
-            outputs = model(images)
-            class_probs = F.softmax(outputs["class_logits"], dim=-1)
+            if use_tta:
+                avg_logits, avg_risk, avg_concepts = tta_predict(
+                    model, images, device, num_aug=tta_aug,
+                )
+                outputs = {
+                    "class_logits": avg_logits.to(device),
+                    "risk_score": avg_risk.to(device),
+                    "concepts": avg_concepts.to(device),
+                    "diameter_mm": torch.zeros(images.size(0), device=device),
+                }
+                class_probs = F.softmax(avg_logits.to(device), dim=-1)
+            else:
+                outputs = model(images)
+                class_probs = F.softmax(outputs["class_logits"], dim=-1)
 
             all_labels.append(labels.numpy())
             all_class_probs.append(class_probs.cpu().numpy())
@@ -88,16 +161,15 @@ def evaluate(model, dataloader, cfg, device):
             diameter_mm = outputs["diameter_mm"]
 
             A, B, C = concepts[:, 0], concepts[:, 1], concepts[:, 2]
-
-            p_malignant_from_probs = class_probs[:, list(malignant_indices)].sum(dim=-1)
+            p_mal_from_probs = class_probs[:, list(malignant_indices)].sum(dim=-1)
 
             all_high = (A > concept_high_threshold) & (B > concept_high_threshold) & (C > concept_high_threshold)
             all_low = (A < concept_low_threshold) & (B < concept_low_threshold) & (C < concept_low_threshold)
             large_diameter = diameter_mm >= diameter_mm_threshold
 
-            violated_1_count += (all_high & (p_malignant_from_probs < 0.5)).sum().item()
-            violated_2_count += (large_diameter & (p_malignant_from_probs < 0.5)).sum().item()
-            violated_3_count += (all_low & (p_malignant_from_probs > 0.7)).sum().item()
+            violated_1_count += (all_high & (p_mal_from_probs < 0.5)).sum().item()
+            violated_2_count += (large_diameter & (p_mal_from_probs < 0.5)).sum().item()
+            violated_3_count += (all_low & (p_mal_from_probs > 0.7)).sum().item()
             total_samples += images.size(0)
 
     y_true = np.concatenate(all_labels)
@@ -126,10 +198,7 @@ def evaluate(model, dataloader, cfg, device):
 
     report = {
         "classification": metrics,
-        "risk": {
-            "auc": auc,
-            "ece": ece,
-        },
+        "risk": {"auc": auc, "ece": ece},
         "concept_mae": concept_mae,
         "constraint_violations": constraint_rates,
     }
@@ -144,6 +213,8 @@ def main():
     parser.add_argument("--config", default="configs/default.yaml", help="Config file")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--output", default=None, help="Output JSON path")
+    parser.add_argument("--tta", action="store_true", help="Enable Test-Time Augmentation (Strategy 2)")
+    parser.add_argument("--tta-aug", type=int, default=4, help="Number of TTA views (default 4)")
     parser.add_argument("--export-viz", action="store_true", help="Export prediction visualizations")
     args = parser.parse_args()
 
@@ -157,13 +228,14 @@ def main():
     model_cfg["img_size"] = cfg["data"]["img_size"]
 
     model = CBMModel(model_cfg).to(device)
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     print(f"Model loaded from {args.checkpoint}")
 
-    test_dataset = load_synthetic_dataset(
+    test_dataset = load_dataset(
         args.data, mode="test",
+        img_size=cfg["data"]["img_size"],
         train_split=cfg["data"]["train_split"],
         val_split=cfg["data"]["val_split"],
         seed=cfg["seed"],
@@ -180,19 +252,24 @@ def main():
         "constraints": cfg.get("constraints", {}),
     }
 
-    report = evaluate(model, test_loader, eval_cfg, device)
+    use_tta = args.tta or cfg["evaluation"].get("tta", {}).get("enabled", False)
+    tta_aug = args.tta_aug or cfg["evaluation"].get("tta", {}).get("num_augmentations", 4)
+
+    report = evaluate(model, test_loader, eval_cfg, device, use_tta=use_tta, tta_aug=tta_aug)
 
     print(f"\n{'='*55}")
     print("EVALUATION REPORT")
+    if use_tta:
+        print(f"  TTA: enabled ({tta_aug} views)")
     print(f"{'='*55}")
     print(f"\nAccuracy: {report['classification']['accuracy']:.4f}")
     print(f"F1 (Macro): {report['classification']['f1_macro']:.4f}")
     print(f"F1 (Weighted): {report['classification']['f1_weighted']:.4f}")
 
     print(f"\nPer-class metrics:")
-    for cls_name, metrics in report["classification"]["per_class"].items():
-        print(f"  {cls_name:<10s}: P={metrics['precision']:.3f} R={metrics['recall']:.3f} "
-              f"F1={metrics['f1']:.3f} (n={metrics['support']})")
+    for cls_name, m in report["classification"]["per_class"].items():
+        print(f"  {cls_name:<10s}: P={m['precision']:.3f} R={m['recall']:.3f} "
+              f"F1={m['f1']:.3f} (n={m['support']})")
 
     print(f"\nConcept MAE:")
     for name, mae in report["concept_mae"].items():
