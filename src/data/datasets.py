@@ -103,7 +103,8 @@ def load_synthetic_dataset(
     labels_path = Path(data_dir) / "labels.csv"
     df = pd.read_csv(labels_path)
 
-    abcd_cache_path = Path(data_dir).parent / "abcd_cache" / "synthetic_abcd.csv"
+    data_path = Path(data_dir)
+    abcd_cache_path = data_path.parent / "abcd_cache" / f"{data_path.name}_abcd.csv"
     if abcd_cache_path.exists():
         abcd_df = pd.read_csv(abcd_cache_path)
         df = df.merge(abcd_df, on="image_id", how="left")
