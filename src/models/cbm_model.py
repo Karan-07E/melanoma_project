@@ -2,8 +2,11 @@
 
 Enforces the HARD CONCEPT BOTTLENECK:
   - The diagnosis head receives ONLY (attended features + concept vector).
-  - The raw 1280-d global vector does NOT flow into the diagnosis head.
-  - The only path from raw features to diagnosis is through the concept bottleneck.
+  - The raw global vector does NOT flow into the diagnosis head.
+
+Optional domain adversarial head (Strategy 3):
+  - DomainClassifier attached to encoder's global features.
+  - Used during training only — not in inference.
 
 Confirmed by test_model_shapes.py which checks gradient flow.
 """
@@ -24,8 +27,6 @@ class CBMModel(nn.Module):
 
         Args:
             config: Dict with keys matching configs/default.yaml model section.
-                    Expects: backbone, pretrained, global_dim, concept_dim,
-                    num_classes, dropout_rate, attention_mode.
         """
         super().__init__()
 
@@ -70,27 +71,34 @@ class CBMModel(nn.Module):
         self._concept_dim = concept_dim
         self._num_classes = num_classes
 
-    def forward(self, x):
+        self.domain_classifier = None
+        domain_cfg = config.get("domain", {})
+        if domain_cfg.get("enabled", False):
+            from src.models.domain_adversarial import DomainClassifier
+            self.domain_classifier = DomainClassifier(
+                feature_dim=global_dim,
+                hidden_dim=domain_cfg.get("domain_classifier_hidden", 64),
+                dropout=dropout_rate,
+            )
+
+    def forward(self, x, return_domain_features=False):
         """Full forward pass through the CBM pipeline.
 
         Args:
             x: (B, 3, H, W) input image tensor.
+            return_domain_features: If True, also return raw global_vec
+                                    for domain classifier use.
 
         Returns:
-            dict with keys:
-              concepts: (B, 4) clinical concept scores [A, B, C, D].
-              diameter_mm: (B,) estimated diameter in mm.
-              class_logits: (B, 7) disease classification logits.
-              risk_score: (B, 1) malignancy risk score [0, 1].
-              attn_map: (B, 1, H_a, W_a) attention weights.
-              global_vec: (B, 1280) raw global vector (for analysis only).
+            dict with keys: concepts, diameter_mm, class_logits,
+            risk_score, attn_map, global_vec.
         """
         global_vec, spatial_feats = self.encoder(x)
         concepts, diameter_mm = self.concept_heads(global_vec)
         attended_feats, attn_map = self.attention(concepts, spatial_feats)
         class_logits, risk_score = self.diagnosis_head(attended_feats, concepts)
 
-        return {
+        result = {
             "concepts": concepts,
             "diameter_mm": diameter_mm,
             "class_logits": class_logits,
@@ -98,18 +106,19 @@ class CBMModel(nn.Module):
             "attn_map": attn_map,
             "global_vec": global_vec,
         }
+        return result
+
+    def domain_forward(self, global_vec, reverse=True, lambda_val=1.0):
+        """Forward pass through the domain classifier (for DANN)."""
+        if self.domain_classifier is None:
+            return None
+        return self.domain_classifier(global_vec, reverse=reverse, lambda_val=lambda_val)
 
     def predict(self, x):
-        """Convenience method returning processed outputs for inference.
-
-        Returns:
-            dict with class_probs, predicted_class, risk_score, risk_level,
-            concepts, attn_map.
-        """
+        """Convenience method returning processed outputs for inference."""
         outputs = self.forward(x)
         class_probs = F.softmax(outputs["class_logits"], dim=-1)
         pred_class = class_probs.argmax(dim=-1)
-
         risk_score = outputs["risk_score"].squeeze(-1)
 
         return {

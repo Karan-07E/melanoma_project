@@ -19,30 +19,86 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.data.abcd_targets import compute_all_abcd, load_image, load_mask
 
 
+def _resolve_ham10000_images(metadata_df, data_path):
+    """Resolve HAM10000 image and mask paths.
+
+    Returns list of dicts with image_path, mask_path, image_id.
+    """
+    images_part1 = data_path / "HAM10000_images_part_1"
+    images_part2 = data_path / "HAM10000_images_part_2"
+    masks_dir = data_path / "HAM10000_segmentations_lesion_tschandl"
+
+    rows = []
+    for _, row in metadata_df.iterrows():
+        img_id = row["image_id"]
+        img_path = None
+        for folder in [images_part1, images_part2]:
+            for ext in [".jpg", ".jpeg", ".png"]:
+                p = folder / f"{img_id}{ext}"
+                if p.exists():
+                    img_path = p
+                    break
+            if img_path:
+                break
+
+        if img_path is None:
+            continue
+
+        mask_path = masks_dir / f"{img_id}_segmentation.png"
+        if not mask_path.exists():
+            mask_path = None
+
+        rows.append({
+            "image_id": img_id,
+            "image_path": str(img_path.resolve()),
+            "mask_path": str(mask_path.resolve()) if mask_path else None,
+        })
+
+    return rows
+
+
 def precompute_abcd(data_dir, img_size=224):
     data_path = Path(data_dir)
-    labels_csv = data_path / "labels.csv"
-
-    if not labels_csv.exists():
-        print(f"ERROR: labels.csv not found in {data_dir}")
-        print("Run scripts/generate_synthetic_data.py first, or download real data.")
-        return
-
-    df = pd.read_csv(labels_csv)
 
     cache_dir = data_path.parent / "abcd_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-
     cache_file = cache_dir / f"{data_path.name}_abcd.csv"
 
-    results = []
-    print(f"Computing ABCD pseudo clinical concepts for {len(df)} images...")
+    is_ham10000 = (data_path / "HAM10000_metadata.csv").exists()
+    is_synthetic = (data_path / "labels.csv").exists()
 
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="ABCD"):
-        img_path = row["image_path"]
-        mask_path = row.get("mask_path", None)
+    if is_ham10000:
+        print(f"Detected HAM10000 dataset at {data_path}")
+        metadata_df = pd.read_csv(data_path / "HAM10000_metadata.csv")
+        entries = _resolve_ham10000_images(metadata_df, data_path)
+        if not entries:
+            print("ERROR: No HAM10000 images found. Check image directory structure.")
+            return
+    elif is_synthetic:
+        print(f"Detected synthetic dataset at {data_path}")
+        df = pd.read_csv(data_path / "labels.csv")
+        entries = []
+        for _, row in df.iterrows():
+            entries.append({
+                "image_id": row["image_id"],
+                "image_path": row["image_path"],
+                "mask_path": row.get("mask_path", None),
+            })
+    else:
+        print(f"ERROR: No HAM10000_metadata.csv or labels.csv found in {data_dir}")
+        return
+
+    results = []
+    print(f"Computing ABCD pseudo clinical concepts for {len(entries)} images...")
+
+    for entry in tqdm(entries, desc="ABCD"):
+        img_path = entry["image_path"]
+        mask_path = entry.get("mask_path", None)
 
         try:
+            if not Path(img_path).exists():
+                raise FileNotFoundError(f"Image not found: {img_path}")
+
             image = load_image(img_path, img_size)
 
             if mask_path and Path(mask_path).exists():
@@ -54,7 +110,7 @@ def precompute_abcd(data_dir, img_size=224):
             abcd = compute_all_abcd(image, mask, img_size)
 
             results.append({
-                "image_id": row["image_id"],
+                "image_id": entry["image_id"],
                 "asymmetry": abcd["asymmetry"],
                 "border": abcd["border"],
                 "color": abcd["color"],
@@ -63,9 +119,9 @@ def precompute_abcd(data_dir, img_size=224):
             })
 
         except Exception as e:
-            print(f"  Warning: Failed on {row['image_id']}: {e}")
+            print(f"  Warning: Failed on {entry['image_id']}: {e}")
             results.append({
-                "image_id": row["image_id"],
+                "image_id": entry["image_id"],
                 "asymmetry": 0.5,
                 "border": 0.5,
                 "color": 0.5,
@@ -93,7 +149,7 @@ def precompute_abcd(data_dir, img_size=224):
 def main():
     parser = argparse.ArgumentParser(description="Precompute ABCD pseudo clinical concepts")
     parser.add_argument("--data", default="data/synthetic",
-                        help="Path to dataset directory (must contain labels.csv)")
+                        help="Path to dataset directory")
     parser.add_argument("--img-size", type=int, default=224,
                         help="Image size")
     args = parser.parse_args()

@@ -30,6 +30,16 @@ augmentation:
   contrast_limit: 0.2
   hue_shift_limit: 10
   sat_shift_limit: 20
+  domain_aug:
+    enabled: true
+    hue_shift_limit: 30
+    sat_shift_limit: 40
+    val_shift_limit: 20
+    clahe_prob: 0.3
+    random_gamma_prob: 0.3
+    rgb_shift_prob: 0.3
+    channel_shuffle_prob: 0.2
+    solarize_prob: 0.1
 
 # --- Model ---
 model:
@@ -57,6 +67,20 @@ training:
 loss:
   lambda_concept: 0.5
   lambda_constraint: 0.1
+  lambda_domain: 0.1
+  lambda_coral: 0.05
+
+# --- Domain Adaptive Training ---
+domain:
+  enabled: false
+  pad_data_dir: "data/pad_ufes20"
+  domain_batch_size: 16
+  domain_classifier_hidden: 64
+
+# --- MixUp ---
+mixup:
+  enabled: true
+  alpha: 0.2
 
 # --- Clinical Constraints ---
 constraints:
@@ -89,3 +113,6 @@ evaluation:
   ece_n_bins: 10
   export_viz: false
   viz_output_dir: "runs/viz_output"
+  tta:
+    enabled: true
+    num_augmentations: 8
