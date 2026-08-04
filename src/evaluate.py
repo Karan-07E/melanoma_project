@@ -211,6 +211,8 @@ def main():
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint")
     parser.add_argument("--data", default="data/synthetic", help="Path to dataset directory")
     parser.add_argument("--config", default="configs/default.yaml", help="Config file")
+    parser.add_argument("--img-size", type=int, default=None,
+                        help="Override image size. Defaults to checkpoint/config image size.")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--output", default=None, help="Output JSON path")
     parser.add_argument("--tta", action="store_true", help="Enable Test-Time Augmentation (Strategy 2)")
@@ -224,12 +226,21 @@ def main():
     device = get_device()
     print(f"Device: {device}")
 
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    checkpoint_cfg = checkpoint.get("config", {})
+    if checkpoint_cfg.get("model"):
+        cfg["model"].update(checkpoint_cfg["model"])
+    if checkpoint_cfg.get("data"):
+        cfg["data"].update(checkpoint_cfg["data"])
+    if args.img_size:
+        cfg["data"]["img_size"] = args.img_size
+
     model_cfg = cfg["model"]
     model_cfg["img_size"] = cfg["data"]["img_size"]
 
     model = CBMModel(model_cfg).to(device)
-    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     print(f"Model loaded from {args.checkpoint}")
 

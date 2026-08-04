@@ -97,6 +97,7 @@ def load_synthetic_dataset(
     val_split: float = 0.15,
     img_size: int = 224,
     seed: int = 42,
+    img_size: int = 224,
 ) -> Dataset:
     """Load the synthetic or HAM10000 dataset with stratified split.
 
@@ -146,7 +147,7 @@ def load_synthetic_dataset(
         split_df = pd.concat(test_dfs).sample(frac=1, random_state=seed)
         transform = get_val_transforms(img_size=img_size)
 
-    return LesionDataset(split_df, transform=transform)
+    return LesionDataset(split_df, transform=transform, img_size=img_size)
 
 
 HAM10000_DX_MAP = {

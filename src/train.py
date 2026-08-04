@@ -24,8 +24,8 @@ import numpy as np
 import yaml
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
+import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import WeightedRandomSampler
 from tqdm import tqdm
@@ -280,8 +280,10 @@ def main():
     parser = argparse.ArgumentParser(description="Train CBM melanoma model")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--data", default="data/synthetic")
-    parser.add_argument("--pad-data", default=None, help="PAD-UFES-20 path for domain adaptation (unlabeled)")
+    parser.add_argument("--pad-data", default=None,
+                        help="Optional PAD-UFES-20 dataset directory for unlabeled domain adaptation")
     parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--img-size", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr-backbone", type=float, default=None)
@@ -312,6 +314,8 @@ def main():
     print(f"Device: {device}")
 
     epochs = args.epochs or cfg["training"]["epochs"]
+    img_size = args.img_size or cfg["data"]["img_size"]
+    cfg["data"]["img_size"] = img_size
     batch_size = args.batch_size or cfg["data"]["batch_size"]
     img_size = args.img_size or cfg["data"]["img_size"]
     num_workers = args.num_workers if args.num_workers is not None else cfg["data"]["num_workers"]
@@ -355,8 +359,9 @@ def main():
         seed=cfg["seed"],
     )
 
-    train_labels = torch.tensor([train_dataset.df.iloc[i]["class_idx"]
-                                  for i in range(len(train_dataset))])
+    train_labels = torch.tensor([
+        train_dataset.df.iloc[i]["class_idx"] for i in range(len(train_dataset))
+    ])
     class_counts = torch.bincount(train_labels, minlength=model_cfg["num_classes"])
     num_classes = model_cfg["num_classes"]
     n_samples = len(train_labels)
@@ -366,11 +371,17 @@ def main():
 
     sample_weights = class_weights_tensor[train_labels].cpu()
     train_sampler = WeightedRandomSampler(
-        weights=sample_weights, num_samples=len(train_dataset), replacement=True,
+        weights=sample_weights,
+        num_samples=len(train_dataset),
+        replacement=True,
     )
 
-    train_loader = get_dataloader(train_dataset, batch_size=batch_size,
-                                  sampler=train_sampler, num_workers=num_workers)
+    train_loader = get_dataloader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=train_sampler,
+        num_workers=num_workers,
+    )
     val_loader = get_dataloader(val_dataset, batch_size=batch_size, shuffle=False,
                                  num_workers=num_workers)
 
@@ -470,6 +481,9 @@ def main():
     print(f"  Image size: {img_size}x{img_size}")
     print(f"  λ_concept={lambda_concept}, λ_constraint={lambda_constraint}")
     print(f"  Backbone LR={backbone_lr}, Head LR={head_lr}")
+    print(f"  Malignant classes: {malignant_classes}")
+    print(f"  Primary data: {args.data}")
+    print(f"  PAD data: {args.pad_data or 'not used'}")
     print(f"  Weight decay={weight_decay}")
     print(f"  MixUp alpha: {cfg['mixup']['alpha']}")
     print(f"  DANN (domain adversarial): {target_domain_enabled}")

@@ -21,52 +21,7 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 IMG_SIZE = 224
 
 
-def _build_domain_aug(cfg, size):
-    """Build domain-invariant color augmentations from config.
-
-    These transforms vary color/lighting aggressively without
-    corrupting lesion morphology — forcing the encoder to learn
-    shape/texture features independent of skin tone and dermatoscope.
-    """
-    if not cfg.get("enabled", True):
-        return []
-
-    return [
-        A.CLAHE(
-            clip_limit=cfg.get("clahe_clip_limit", 2.0),
-            tile_grid_size=(8, 8),
-            p=cfg.get("clahe_prob", 0.3),
-        ),
-        A.RandomGamma(
-            gamma_limit=(cfg.get("gamma_min", 60), cfg.get("gamma_max", 140)),
-            p=cfg.get("random_gamma_prob", 0.3),
-        ),
-        A.HueSaturationValue(
-            hue_shift_limit=cfg.get("hue_shift_limit", 30),
-            sat_shift_limit=cfg.get("sat_shift_limit", 40),
-            val_shift_limit=cfg.get("val_shift_limit", 20),
-            p=0.6,
-        ),
-        A.RandomBrightnessContrast(
-            brightness_limit=cfg.get("brightness_limit", 0.35),
-            contrast_limit=cfg.get("contrast_limit", 0.35),
-            p=0.6,
-        ),
-        A.RGBShift(
-            r_shift_limit=cfg.get("rgb_shift_limit", 20),
-            g_shift_limit=cfg.get("rgb_shift_limit", 20),
-            b_shift_limit=cfg.get("rgb_shift_limit", 20),
-            p=cfg.get("rgb_shift_prob", 0.3),
-        ),
-        A.ChannelShuffle(p=cfg.get("channel_shuffle_prob", 0.2)),
-        A.Solarize(
-            threshold_range=(cfg.get("solarize_threshold", 0.5), 1.0),
-            p=cfg.get("solarize_prob", 0.1),
-        ),
-    ]
-
-
-def get_train_transforms(cfg=None, img_size=None):
+def get_train_transforms(cfg=None):
     """Build training augmentation pipeline with dermoscopy-safe transforms.
 
     Includes domain-invariant color augmentations for cross-domain
@@ -82,8 +37,8 @@ def get_train_transforms(cfg=None, img_size=None):
 
     domain_cfg = cfg.get("domain_aug", {})
 
-    pipeline = [
-        A.Resize(height=size, width=size),
+    return A.Compose([
+        A.Resize(height=IMG_SIZE, width=IMG_SIZE),
         A.HorizontalFlip(p=cfg.get("horizontal_flip_prob", 0.5)),
         A.VerticalFlip(p=cfg.get("vertical_flip_prob", 0.3)),
         A.RandomRotate90(p=0.5),
@@ -112,25 +67,11 @@ def get_train_transforms(cfg=None, img_size=None):
     return A.Compose(pipeline)
 
 
-def get_val_transforms(img_size=None):
+def get_val_transforms():
     """Build validation/testing pipeline: only resize + normalize."""
     size = img_size or IMG_SIZE
     return A.Compose([
-        A.Resize(height=size, width=size),
-        A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ToTensorV2(),
-    ])
-
-
-def get_tta_transforms(img_size=None):
-    """Build TTA (test-time augmentation) transforms for inference averaging.
-
-    Returns a list of transform pipelines that produce varied views
-    of the same image for prediction averaging (Strategy 2).
-    """
-    size = img_size or IMG_SIZE
-    base = A.Compose([
-        A.Resize(height=size, width=size),
+        A.Resize(height=IMG_SIZE, width=IMG_SIZE),
         A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ToTensorV2(),
     ])
