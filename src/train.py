@@ -19,6 +19,7 @@ import numpy as np
 import yaml
 import torch
 import torch.optim as optim
+from torch.utils.data import ConcatDataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
@@ -159,7 +160,10 @@ def main():
     parser = argparse.ArgumentParser(description="Train CBM melanoma model")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--data", default="data/synthetic")
+    parser.add_argument("--pad-data", default=None,
+                        help="Optional PAD-UFES-20 dataset directory to mix into training/validation")
     parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--img-size", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr-backbone", type=float, default=None)
@@ -190,13 +194,15 @@ def main():
     print(f"Device: {device}")
 
     epochs = args.epochs or cfg["training"]["epochs"]
+    img_size = args.img_size or cfg["data"]["img_size"]
+    cfg["data"]["img_size"] = img_size
     batch_size = args.batch_size or cfg["data"]["batch_size"]
     num_workers = args.num_workers if args.num_workers is not None else cfg["data"]["num_workers"]
     lambda_concept = args.lambda_concept or cfg["loss"]["lambda_concept"]
     lambda_constraint = args.lambda_constraint or cfg["loss"]["lambda_constraint"]
 
     model_cfg = cfg["model"]
-    model_cfg["img_size"] = cfg["data"]["img_size"]
+    model_cfg["img_size"] = img_size
 
     model = CBMModel(model_cfg).to(device)
     if args.freeze_encoder:
@@ -210,13 +216,39 @@ def main():
         train_split=cfg["data"]["train_split"],
         val_split=cfg["data"]["val_split"],
         seed=cfg["seed"],
+        img_size=img_size,
     )
     val_dataset = load_synthetic_dataset(
         args.data, mode="val",
         train_split=cfg["data"]["train_split"],
         val_split=cfg["data"]["val_split"],
         seed=cfg["seed"],
+        img_size=img_size,
     )
+    if args.pad_data:
+        pad_path = Path(args.pad_data)
+        if not (pad_path / "labels.csv").exists():
+            raise FileNotFoundError(
+                f"--pad-data was provided, but {pad_path / 'labels.csv'} does not exist. "
+                "Prepare PAD-UFES-20 with a HAM10000-compatible labels.csv first."
+            )
+        pad_train_dataset = load_synthetic_dataset(
+            args.pad_data, mode="train",
+            train_split=cfg["data"]["train_split"],
+            val_split=cfg["data"]["val_split"],
+            seed=cfg["seed"],
+            img_size=img_size,
+        )
+        pad_val_dataset = load_synthetic_dataset(
+            args.pad_data, mode="val",
+            train_split=cfg["data"]["train_split"],
+            val_split=cfg["data"]["val_split"],
+            seed=cfg["seed"],
+            img_size=img_size,
+        )
+        train_dataset = ConcatDataset([train_dataset, pad_train_dataset])
+        val_dataset = ConcatDataset([val_dataset, pad_val_dataset])
+        cfg["data"]["pad_ufes20_dir"] = args.pad_data
     train_loader = get_dataloader(train_dataset, batch_size=batch_size, shuffle=True,
                                   num_workers=num_workers)
     val_loader = get_dataloader(val_dataset, batch_size=batch_size, shuffle=False,
@@ -298,6 +330,9 @@ def main():
     print(f"  λ_concept={lambda_concept}, λ_constraint={lambda_constraint}")
     print(f"  Backbone LR={backbone_lr}, Head LR={head_lr}")
     print(f"  Malignant classes: {malignant_classes}")
+    print(f"  Image size: {img_size}")
+    print(f"  Primary data: {args.data}")
+    print(f"  PAD data: {args.pad_data or 'not used'}")
     print(f"  AMP: {use_amp}")
     print(f"  cuDNN: {torch.backends.cudnn.enabled}")
     print(f"  Freeze encoder: {args.freeze_encoder}")

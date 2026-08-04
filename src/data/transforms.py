@@ -13,7 +13,7 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 IMG_SIZE = 224
 
 
-def get_train_transforms(cfg=None):
+def get_train_transforms(cfg=None, img_size=IMG_SIZE):
     """Build training augmentation pipeline with dermoscopy-safe transforms.
 
     Args:
@@ -27,7 +27,7 @@ def get_train_transforms(cfg=None):
         cfg = {}
 
     return A.Compose([
-        A.Resize(height=IMG_SIZE, width=IMG_SIZE),
+        A.Resize(height=img_size, width=img_size),
         A.HorizontalFlip(p=cfg.get("horizontal_flip_prob", 0.5)),
         A.VerticalFlip(p=cfg.get("vertical_flip_prob", 0.3)),
         A.RandomRotate90(p=0.5),
@@ -54,10 +54,10 @@ def get_train_transforms(cfg=None):
     ])
 
 
-def get_val_transforms():
+def get_val_transforms(img_size=IMG_SIZE):
     """Build validation/testing pipeline: only resize + normalize."""
     return A.Compose([
-        A.Resize(height=IMG_SIZE, width=IMG_SIZE),
+        A.Resize(height=img_size, width=img_size),
         A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ToTensorV2(),
     ])

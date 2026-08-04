@@ -87,6 +87,7 @@ def load_synthetic_dataset(
     train_split: float = 0.7,
     val_split: float = 0.15,
     seed: int = 42,
+    img_size: int = 224,
 ) -> Dataset:
     """Load the synthetic dataset with stratified split.
 
@@ -124,15 +125,15 @@ def load_synthetic_dataset(
 
     if mode == "train":
         split_df = pd.concat(train_dfs).sample(frac=1, random_state=seed)
-        transform = get_train_transforms()
+        transform = get_train_transforms(img_size=img_size)
     elif mode == "val":
         split_df = pd.concat(val_dfs).sample(frac=1, random_state=seed)
-        transform = get_val_transforms()
+        transform = get_val_transforms(img_size=img_size)
     else:
         split_df = pd.concat(test_dfs).sample(frac=1, random_state=seed)
-        transform = get_val_transforms()
+        transform = get_val_transforms(img_size=img_size)
 
-    return LesionDataset(split_df, transform=transform)
+    return LesionDataset(split_df, transform=transform, img_size=img_size)
 
 
 def get_dataloader(dataset, batch_size=32, shuffle=True, num_workers=4):
