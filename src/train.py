@@ -321,7 +321,6 @@ def main():
     parser.add_argument("--data", default="data/ham10000")
     parser.add_argument("--pad-data", default=None, help="PAD-UFES-20 path for domain adaptation (unlabeled)")
     parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--img-size", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr-backbone", type=float, default=None)
