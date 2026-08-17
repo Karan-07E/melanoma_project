@@ -13,7 +13,6 @@ Supports Test-Time Augmentation (Strategy 2):
   brightness shifts) for more robust evaluation.
 
 Usage:
-  python src/evaluate.py --checkpoint models/best.pt --data data/synthetic
   python src/evaluate.py --checkpoint models/best.pt --data data/ham10000 --tta
   python src/evaluate.py --checkpoint models/best.pt --data data/pad_ufes20 --tta
 """
@@ -73,6 +72,7 @@ def tta_predict(model, images, device, tta_transforms=None, num_aug=4):
     all_logits = []
     all_risk = []
     all_concepts = []
+    all_diameter = []
 
     tta_views = []
     for i in range(min(num_aug, 8)):
@@ -99,12 +99,14 @@ def tta_predict(model, images, device, tta_transforms=None, num_aug=4):
             all_logits.append(out["class_logits"].cpu())
             all_risk.append(out["risk_score"].cpu())
             all_concepts.append(out["concepts"].cpu())
+            all_diameter.append(out["diameter_mm"].cpu())
 
     avg_logits = torch.stack(all_logits).mean(dim=0)
     avg_risk = torch.stack(all_risk).mean(dim=0)
     avg_concepts = torch.stack(all_concepts).mean(dim=0)
+    avg_diameter = torch.stack(all_diameter).mean(dim=0)
 
-    return avg_logits, avg_risk, avg_concepts
+    return avg_logits, avg_risk, avg_concepts, avg_diameter
 
 
 def evaluate(model, dataloader, cfg, device, use_tta=False, tta_aug=4):
@@ -135,14 +137,14 @@ def evaluate(model, dataloader, cfg, device, use_tta=False, tta_aug=4):
             labels = batch["label"]
 
             if use_tta:
-                avg_logits, avg_risk, avg_concepts = tta_predict(
+                avg_logits, avg_risk, avg_concepts, avg_diameter = tta_predict(
                     model, images, device, num_aug=tta_aug,
                 )
                 outputs = {
                     "class_logits": avg_logits.to(device),
                     "risk_score": avg_risk.to(device),
                     "concepts": avg_concepts.to(device),
-                    "diameter_mm": torch.zeros(images.size(0), device=device),
+                    "diameter_mm": avg_diameter.to(device),
                 }
                 class_probs = F.softmax(avg_logits.to(device), dim=-1)
             else:
@@ -209,14 +211,15 @@ def evaluate(model, dataloader, cfg, device, use_tta=False, tta_aug=4):
 def main():
     parser = argparse.ArgumentParser(description="Evaluate CBM melanoma model")
     parser.add_argument("--checkpoint", required=True, help="Path to model checkpoint")
-    parser.add_argument("--data", default="data/synthetic", help="Path to dataset directory")
+    parser.add_argument("--data", default="data/ham10000", help="Path to dataset directory")
     parser.add_argument("--config", default="configs/default.yaml", help="Config file")
     parser.add_argument("--img-size", type=int, default=None,
-                        help="Override image size. Defaults to checkpoint/config image size.")
+                        help="Override image size from the checkpoint/config")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--output", default=None, help="Output JSON path")
     parser.add_argument("--tta", action="store_true", help="Enable Test-Time Augmentation (Strategy 2)")
-    parser.add_argument("--tta-aug", type=int, default=4, help="Number of TTA views (default 4)")
+    parser.add_argument("--tta-aug", type=int, default=None,
+                        help="Number of TTA views (defaults to config)")
     parser.add_argument("--export-viz", action="store_true", help="Export prediction visualizations")
     args = parser.parse_args()
 
@@ -228,18 +231,18 @@ def main():
 
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     checkpoint_cfg = checkpoint.get("config", {})
-    if checkpoint_cfg.get("model"):
-        cfg["model"].update(checkpoint_cfg["model"])
-    if checkpoint_cfg.get("data"):
-        cfg["data"].update(checkpoint_cfg["data"])
-    if args.img_size:
+    for section in ("model", "data", "augmentation", "constraints", "evaluation", "domain"):
+        saved_section = checkpoint_cfg.get(section)
+        if isinstance(saved_section, dict):
+            cfg.setdefault(section, {}).update(saved_section)
+    if args.img_size is not None:
         cfg["data"]["img_size"] = args.img_size
 
     model_cfg = cfg["model"]
     model_cfg["img_size"] = cfg["data"]["img_size"]
 
     model = CBMModel(model_cfg).to(device)
-    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     print(f"Model loaded from {args.checkpoint}")
@@ -250,6 +253,7 @@ def main():
         train_split=cfg["data"]["train_split"],
         val_split=cfg["data"]["val_split"],
         seed=cfg["seed"],
+        augmentation_cfg=cfg.get("augmentation", {}),
     )
     test_loader = get_dataloader(test_dataset, batch_size=args.batch_size, shuffle=False)
     print(f"Test set: {len(test_dataset)} samples")
@@ -263,8 +267,9 @@ def main():
         "constraints": cfg.get("constraints", {}),
     }
 
-    use_tta = args.tta or cfg["evaluation"].get("tta", {}).get("enabled", False)
-    tta_aug = args.tta_aug or cfg["evaluation"].get("tta", {}).get("num_augmentations", 4)
+    tta_cfg = cfg["evaluation"].get("tta", {})
+    use_tta = args.tta or tta_cfg.get("enabled", False)
+    tta_aug = args.tta_aug if args.tta_aug is not None else tta_cfg.get("num_augmentations", 4)
 
     report = evaluate(model, test_loader, eval_cfg, device, use_tta=use_tta, tta_aug=tta_aug)
 

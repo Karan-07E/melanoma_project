@@ -27,7 +27,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data.datasets import load_synthetic_dataset, get_dataloader
+from src.data.datasets import load_dataset, get_dataloader
 from src.models.cbm_model import CBMModel
 from src.utils.temperature_scaling import TemperatureScaler
 
@@ -166,11 +166,13 @@ def main():
     model.eval()
     print(f"Model loaded from {args.checkpoint}")
 
-    val_dataset = load_synthetic_dataset(
+    val_dataset = load_dataset(
         args.data, mode="val",
         train_split=cfg["data"]["train_split"],
         val_split=cfg["data"]["val_split"],
         seed=cfg["seed"],
+        img_size=cfg["data"]["img_size"],
+        augmentation_cfg=cfg.get("augmentation", {}),
     )
     val_loader = get_dataloader(val_dataset, batch_size=args.batch_size, shuffle=False)
     print(f"Validation set: {len(val_dataset)} samples")

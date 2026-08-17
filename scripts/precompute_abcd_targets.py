@@ -2,7 +2,6 @@
 """Precompute ABCD pseudo clinical concepts for a dataset and cache them.
 
 Usage:
-  python scripts/precompute_abcd_targets.py --data data/synthetic
   python scripts/precompute_abcd_targets.py --data data/ham10000
 """
 
@@ -65,7 +64,6 @@ def precompute_abcd(data_dir, img_size=224):
     cache_file = cache_dir / f"{data_path.name}_abcd.csv"
 
     is_ham10000 = (data_path / "HAM10000_metadata.csv").exists()
-    is_synthetic = (data_path / "labels.csv").exists()
 
     if is_ham10000:
         print(f"Detected HAM10000 dataset at {data_path}")
@@ -74,18 +72,8 @@ def precompute_abcd(data_dir, img_size=224):
         if not entries:
             print("ERROR: No HAM10000 images found. Check image directory structure.")
             return
-    elif is_synthetic:
-        print(f"Detected synthetic dataset at {data_path}")
-        df = pd.read_csv(data_path / "labels.csv")
-        entries = []
-        for _, row in df.iterrows():
-            entries.append({
-                "image_id": row["image_id"],
-                "image_path": row["image_path"],
-                "mask_path": row.get("mask_path", None),
-            })
     else:
-        print(f"ERROR: No HAM10000_metadata.csv or labels.csv found in {data_dir}")
+        print(f"ERROR: HAM10000_metadata.csv not found in {data_dir}")
         return
 
     results = []
@@ -148,7 +136,7 @@ def precompute_abcd(data_dir, img_size=224):
 
 def main():
     parser = argparse.ArgumentParser(description="Precompute ABCD pseudo clinical concepts")
-    parser.add_argument("--data", default="data/synthetic",
+    parser.add_argument("--data", default="data/ham10000",
                         help="Path to dataset directory")
     parser.add_argument("--img-size", type=int, default=224,
                         help="Image size")

@@ -54,7 +54,7 @@ Dermoscopic Image (224×224×3)
 
 ---
 
-## Quick Start (Local, No Downloads)
+## Quick Start (Real Data)
 
 ```bash
 # 1. Setup
@@ -62,17 +62,18 @@ python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# 2. Generate synthetic smoke-test data
-python scripts/generate_synthetic_data.py
+# 2. Download HAM10000 and PAD-UFES-20 manually under data/, then verify
+python scripts/download_ham10000.py
+python scripts/download_pad_ufes20.py
 
-# 3. Precompute ABCD pseudo clinical concepts
-python scripts/precompute_abcd_targets.py --data data/synthetic
+# 3. Precompute ABCD pseudo clinical concepts for HAM10000
+python scripts/precompute_abcd_targets.py --data data/ham10000
 
-# 4. Train (3 epochs on CPU, ~5-10 min)
-python src/train.py --config configs/default.yaml --data data/synthetic --epochs 3
+# 4. Train with unsupervised PAD-UFES-20 domain adaptation
+python src/train.py --data data/ham10000 --pad-data data/pad_ufes20 --epochs 60
 
-# 5. Evaluate
-python src/evaluate.py --checkpoint models/best.pt --data data/synthetic
+# 5. Evaluate on PAD-UFES-20
+python src/evaluate.py --checkpoint models/best.pt --data data/pad_ufes20 --tta
 
 # 6. Launch demo app (auto-downloads pretrained checkpoint if missing)
 python app/demo_app.py
@@ -396,7 +397,6 @@ CBM-Neuro-approach/
 ├── configs/
 │   └── default.yaml               # All hyperparameters
 ├── data/
-│   ├── synthetic/                  # Auto-generated smoke-test data
 │   ├── ham10000/                   # HAM10000 dataset (manual download)
 │   ├── pad_ufes20/                 # PAD-UFES-20 dataset (manual download)
 │   └── abcd_cache/                 # Precomputed ABCD targets
@@ -404,7 +404,6 @@ CBM-Neuro-approach/
 │   ├── download_ham10000.py
 │   ├── download_pad_ufes20.py
 │   ├── download_models.py          # Pull checkpoints from HF Hub
-│   ├── generate_synthetic_data.py
 │   ├── optimize_threshold.py       # Melanoma threshold + temperature scaling
 │   └── precompute_abcd_targets.py
 ├── src/
@@ -422,7 +421,7 @@ CBM-Neuro-approach/
 │   │   └── alignment_loss.py       # CORAL + MMD feature alignment (Strategy 4)
 │   ├── data/
 │   │   ├── abcd_targets.py         # ABCD pseudo concept labeler (SSIM, isoperimetric ratio, HSV entropy)
-│   │   ├── datasets.py             # HAM10000 / PAD-UFES-20 / synthetic dataset classes + auto-detection
+│   │   ├── datasets.py             # HAM10000 / PAD-UFES-20 dataset classes + auto-detection
 │   │   └── transforms.py           # Dermoscopy-safe data augmentation
 │   ├── train.py                    # Training with class weights, weighted sampler, macro F1 early stop
 │   ├── evaluate.py                 # Full metric report + cross-domain evaluation
@@ -436,8 +435,6 @@ CBM-Neuro-approach/
 │   ├── test_abcd_targets.py        # ABCD labeler unit tests
 │   ├── test_model_shapes.py        # Shape + gradient flow validation (hard bottleneck)
 │   └── test_constraints.py         # Clinical constraint logic tests
-└── notebooks/
-    └── walkthrough.py              # End-to-end pipeline demonstration
 ```
 
 ---

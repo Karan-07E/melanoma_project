@@ -10,7 +10,6 @@ device: "auto"  # "auto", "cuda", "cpu", "mps"
 
 # --- Data ---
 data:
-  synthetic_dir: "data/synthetic"
   ham10000_dir: "data/ham10000"
   pad_ufes20_dir: "data/pad_ufes20"
   abcd_cache_dir: "data/abcd_cache"
@@ -59,6 +58,7 @@ training:
   backbone_lr: 0.00001
   head_lr: 0.001
   weight_decay: 0.0001
+  label_smoothing: 0.05
   lr_scheduler: "cosine"
   early_stop_patience: 15
   grad_clip_norm: 1.0
@@ -69,6 +69,7 @@ loss:
   lambda_constraint: 0.1
   lambda_domain: 0.1
   lambda_coral: 0.05
+  lambda_target_consistency: 0.25
 
 # --- Domain Adaptive Training ---
 domain:
@@ -76,6 +77,11 @@ domain:
   pad_data_dir: "data/pad_ufes20"
   domain_batch_size: 16
   domain_classifier_hidden: 64
+  adversarial_lambda: 1.0
+  adversarial_gamma: 10.0
+  target_confidence: 0.8
+  normalize_alignment_features: true
+  alignment_mean_weight: 0.25
 
 # --- MixUp ---
 mixup:

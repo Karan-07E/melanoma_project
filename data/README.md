@@ -1,14 +1,8 @@
 # Data Directory
 
-This project uses three data sources. Synthetic data is generated automatically for smoke-testing. Real datasets require manual download.
-
-## Synthetic Data (auto-generated, works today)
-
-```bash
-python scripts/generate_synthetic_data.py
-```
-
-Creates 300 procedurally generated lesion images in `data/synthetic/` with 7 class labels and segmentation masks. Used for testing the full pipeline without external downloads.
+This project uses HAM10000 for supervised training and PAD-UFES-20 for
+cross-domain evaluation. Real datasets require manual download and are not
+bundled in the repository.
 
 ## HAM10000 (real training data)
 

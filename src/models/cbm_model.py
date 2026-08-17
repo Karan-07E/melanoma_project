@@ -93,7 +93,7 @@ class CBMModel(nn.Module):
             dict with keys: concepts, diameter_mm, class_logits,
             risk_score, attn_map, global_vec.
         """
-        global_vec, spatial_feats = self.encoder(x)
+        global_vec, spatial_feats = self.encode(x)
         concepts, diameter_mm = self.concept_heads(global_vec)
         attended_feats, attn_map = self.attention(concepts, spatial_feats)
         class_logits, risk_score = self.diagnosis_head(attended_feats, concepts)
@@ -107,6 +107,10 @@ class CBMModel(nn.Module):
             "global_vec": global_vec,
         }
         return result
+
+    def encode(self, x):
+        """Return encoder features without running supervised task heads."""
+        return self.encoder(x)
 
     def domain_forward(self, global_vec, reverse=True, lambda_val=1.0):
         """Forward pass through the domain classifier (for DANN)."""

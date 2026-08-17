@@ -8,7 +8,6 @@ L_total = L_diagnosis + λ_concept·L_concept + λ_constraint·L_constraint
 With MixUp (Strategy 5) and aggressive color augmentation (Strategy 1).
 
 Usage:
-  python src/train.py --config configs/default.yaml --data data/synthetic --epochs 3
   python src/train.py --config configs/default.yaml --data data/ham10000 --epochs 60
   python src/train.py --data data/ham10000 --pad-data data/pad_ufes20 --epochs 60
 """
@@ -34,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.datasets import load_dataset, get_dataloader, load_pad_ufes20_dataset
 from src.models.cbm_model import CBMModel
+from src.models.domain_adversarial import scheduled_adversarial_lambda
 from src.losses.multitask_loss import MultiTaskLoss
 from src.losses.alignment_loss import AlignmentLoss
 
@@ -97,6 +97,18 @@ def mixup_criterion(criterion, pred, y_a, y_b, lam):
     return lam * criterion(pred, y_a) + (1.0 - lam) * criterion(pred, y_b)
 
 
+def target_consistency_loss(weak_logits, strong_logits, confidence_threshold):
+    """Train on confident target pseudo-labels without reading target labels."""
+    weak_probs = F.softmax(weak_logits.detach(), dim=-1)
+    confidence, pseudo_labels = weak_probs.max(dim=-1)
+    confident = confidence.ge(confidence_threshold)
+    per_sample = F.cross_entropy(strong_logits, pseudo_labels, reduction="none")
+
+    if not confident.any():
+        return strong_logits.sum() * 0.0
+    return per_sample[confident].mean()
+
+
 def train_one_epoch(
     model, source_loader, target_loader, criterion, coral_loss_fn,
     optimizer, device, epoch, num_epochs, cfg,
@@ -107,15 +119,17 @@ def train_one_epoch(
         "total": 0.0, "diagnosis": 0.0, "concept": 0.0,
         "constraint_total": 0.0, "constraint_rule1": 0.0,
         "constraint_rule2": 0.0, "constraint_rule3": 0.0,
-        "domain": 0.0, "coral": 0.0,
+        "domain": 0.0, "coral": 0.0, "target_consistency": 0.0,
     }
     correct = 0
     total_samples = 0
 
     lambda_domain = cfg["loss"].get("lambda_domain", 0.1)
     lambda_coral = cfg["loss"].get("lambda_coral", 0.05)
+    lambda_target_consistency = cfg["loss"].get("lambda_target_consistency", 0.0)
     domain_enabled = cfg["domain"].get("enabled", False)
     mixup_alpha = cfg["mixup"].get("alpha", 0.2)
+    target_confidence = cfg["domain"].get("target_confidence", 0.8)
 
     target_iter = iter(target_loader) if target_loader is not None else None
 
@@ -134,9 +148,13 @@ def train_one_epoch(
             except StopIteration:
                 target_iter = iter(target_loader)
                 target_batch = next(target_iter)
-            target_images = target_batch["image"].to(device)
+            target_images = target_batch.get("image_weak", target_batch["image"]).to(device)
+            target_strong_images = target_batch.get(
+                "image_strong", target_batch["image"]
+            ).to(device)
         else:
             target_images = None
+            target_strong_images = None
 
         optimizer.zero_grad(set_to_none=True)
         amp_context = torch.amp.autocast("cuda") if use_amp else nullcontext()
@@ -144,16 +162,34 @@ def train_one_epoch(
             outputs = model(images)
 
             if domain_enabled and target_images is not None:
-                with torch.no_grad():
-                    target_out = model(target_images)
+                # Keep the target path differentiable. Detaching it makes
+                # CORAL align the source to stale target features only.
+                target_out = model(target_images)
                 target_gvec = target_out["global_vec"]
                 source_gvec = outputs["global_vec"]
 
                 coral_loss_val = coral_loss_fn(source_gvec, target_gvec) if lambda_coral > 0 else torch.tensor(0.0, device=device)
 
+                target_strong_out = model(target_strong_images)
+                target_consistency = target_consistency_loss(
+                    target_out["class_logits"],
+                    target_strong_out["class_logits"],
+                    target_confidence,
+                )
+
                 if model.domain_classifier is not None:
-                    domain_logits_s = model.domain_forward(source_gvec, reverse=True, lambda_val=1.0)
-                    domain_logits_t = model.domain_forward(target_gvec, reverse=True, lambda_val=1.0)
+                    progress = ((epoch - 1) + batch_idx / max(len(source_loader), 1)) / max(num_epochs, 1)
+                    adv_lambda = scheduled_adversarial_lambda(
+                        progress,
+                        max_lambda=cfg["domain"].get("adversarial_lambda", 1.0),
+                        gamma=cfg["domain"].get("adversarial_gamma", 10.0),
+                    )
+                    domain_logits_s = model.domain_forward(
+                        source_gvec, reverse=True, lambda_val=adv_lambda
+                    )
+                    domain_logits_t = model.domain_forward(
+                        target_gvec, reverse=True, lambda_val=adv_lambda
+                    )
 
                     domain_labels_s = torch.zeros(source_gvec.size(0), dtype=torch.long, device=device)
                     domain_labels_t = torch.ones(target_gvec.size(0), dtype=torch.long, device=device)
@@ -167,6 +203,7 @@ def train_one_epoch(
             else:
                 coral_loss_val = torch.tensor(0.0, device=device)
                 domain_loss_val = torch.tensor(0.0, device=device)
+                target_consistency = torch.tensor(0.0, device=device)
 
             if mixup_alpha > 0:
                 target_dict = {"label": labels_a, "abcd_targets": abcd}
@@ -194,11 +231,13 @@ def train_one_epoch(
                 + criterion.lambda_constraint * loss_dict["constraint_total"]
                 + lambda_domain * domain_loss_val
                 + lambda_coral * coral_loss_val
+                + lambda_target_consistency * target_consistency
             )
 
             loss_dict["total"] = total_loss
             loss_dict["domain"] = domain_loss_val
             loss_dict["coral"] = coral_loss_val
+            loss_dict["target_consistency"] = target_consistency
 
         if scaler is not None and use_amp:
             scaler.scale(total_loss).backward()
@@ -227,8 +266,8 @@ def train_one_epoch(
         global_step = (epoch - 1) * len(source_loader) + batch_idx
         if writer and batch_idx % log_interval == 0:
             for k in ["total", "diagnosis", "concept", "constraint_total",
-                       "constraint_rule1", "constraint_rule2", "constraint_rule3",
-                       "domain", "coral"]:
+                 "constraint_rule1", "constraint_rule2", "constraint_rule3",
+                 "domain", "coral", "target_consistency"]:
                 if k in loss_dict:
                     writer.add_scalar(f"loss/train_{k}", loss_dict[k].item(), global_step)
 
@@ -279,9 +318,8 @@ def validate(model, dataloader, criterion, device, use_amp=False):
 def main():
     parser = argparse.ArgumentParser(description="Train CBM melanoma model")
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--data", default="data/synthetic")
-    parser.add_argument("--pad-data", default=None,
-                        help="Optional PAD-UFES-20 dataset directory for unlabeled domain adaptation")
+    parser.add_argument("--data", default="data/ham10000")
+    parser.add_argument("--pad-data", default=None, help="PAD-UFES-20 path for domain adaptation (unlabeled)")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--img-size", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
@@ -292,6 +330,7 @@ def main():
     parser.add_argument("--lambda-constraint", type=float, default=None)
     parser.add_argument("--lambda-domain", type=float, default=None)
     parser.add_argument("--lambda-coral", type=float, default=None)
+    parser.add_argument("--lambda-target-consistency", type=float, default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--img-size", type=int, default=None)
@@ -319,8 +358,14 @@ def main():
     batch_size = args.batch_size or cfg["data"]["batch_size"]
     img_size = args.img_size or cfg["data"]["img_size"]
     num_workers = args.num_workers if args.num_workers is not None else cfg["data"]["num_workers"]
-    lambda_concept = args.lambda_concept or cfg["loss"]["lambda_concept"]
-    lambda_constraint = args.lambda_constraint or cfg["loss"]["lambda_constraint"]
+    lambda_concept = args.lambda_concept if args.lambda_concept is not None else cfg["loss"]["lambda_concept"]
+    lambda_constraint = args.lambda_constraint if args.lambda_constraint is not None else cfg["loss"]["lambda_constraint"]
+    if args.lambda_domain is not None:
+        cfg["loss"]["lambda_domain"] = args.lambda_domain
+    if args.lambda_coral is not None:
+        cfg["loss"]["lambda_coral"] = args.lambda_coral
+    if args.lambda_target_consistency is not None:
+        cfg["loss"]["lambda_target_consistency"] = args.lambda_target_consistency
 
     model_cfg = cfg["model"]
     model_cfg["img_size"] = img_size
@@ -350,6 +395,7 @@ def main():
         val_split=cfg["data"]["val_split"],
         img_size=img_size,
         seed=cfg["seed"],
+        augmentation_cfg=cfg.get("augmentation", {}),
     )
     val_dataset = load_dataset(
         args.data, mode="val",
@@ -357,6 +403,7 @@ def main():
         val_split=cfg["data"]["val_split"],
         img_size=img_size,
         seed=cfg["seed"],
+        augmentation_cfg=cfg.get("augmentation", {}),
     )
 
     train_labels = torch.tensor([
@@ -391,14 +438,22 @@ def main():
         pad_dir = cfg["domain"].get("pad_data_dir", cfg["data"]["pad_ufes20_dir"])
         domain_batch_size = cfg["domain"].get("domain_batch_size", batch_size)
         try:
-            target_dataset = load_pad_ufes20_dataset(pad_dir, img_size=img_size)
+            target_dataset = load_pad_ufes20_dataset(
+                pad_dir,
+                img_size=img_size,
+                augmentation_cfg=cfg.get("augmentation", {}),
+                return_views=True,
+            )
+            if len(target_dataset) < 2:
+                raise ValueError("target domain must contain at least two images")
             target_loader = get_dataloader(target_dataset, batch_size=min(domain_batch_size, len(target_dataset)),
                                             shuffle=True, num_workers=num_workers)
             print(f"Domain target (PAD-UFES-20, unlabeled): {len(target_dataset)} images")
         except Exception as e:
             print(f"WARNING: Domain target dataset not available: {e}")
             target_domain_enabled = False
-            model_cfg["domain"]["enabled"] = False
+            # Keep the classifier/configuration in sync with the model that
+            # was already constructed. The target path simply stays unused.
 
     print(f"Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples")
 
@@ -420,16 +475,19 @@ def main():
         lambda_constraint=lambda_constraint,
         malignant_indices=malignant_indices,
         class_weights=class_weights_tensor,
+        label_smoothing=cfg["training"].get("label_smoothing", 0.0),
         **constraint_cfg,
     )
 
     coral_loss_fn = AlignmentLoss(
         mode=cfg.get("domain", {}).get("alignment_mode", "coral"),
         weight=1.0,
+        normalize=cfg.get("domain", {}).get("normalize_alignment_features", True),
+        mean_weight=cfg.get("domain", {}).get("alignment_mean_weight", 0.25),
     ).to(device)
 
-    backbone_lr = args.lr_backbone or cfg["training"]["backbone_lr"]
-    head_lr = args.lr_head or cfg["training"]["head_lr"]
+    backbone_lr = args.lr_backbone if args.lr_backbone is not None else cfg["training"]["backbone_lr"]
+    head_lr = args.lr_head if args.lr_head is not None else cfg["training"]["head_lr"]
     weight_decay = cfg["training"]["weight_decay"]
 
     backbone_params = []
@@ -486,6 +544,7 @@ def main():
     print(f"  PAD data: {args.pad_data or 'not used'}")
     print(f"  Weight decay={weight_decay}")
     print(f"  MixUp alpha: {cfg['mixup']['alpha']}")
+    print(f"  Target consistency: {cfg['loss'].get('lambda_target_consistency', 0.0)}")
     print(f"  DANN (domain adversarial): {target_domain_enabled}")
     print(f"  CORAL alignment: {target_domain_enabled}")
     print(f"  AMP: {use_amp}")

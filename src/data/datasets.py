@@ -1,4 +1,4 @@
-"""PyTorch Dataset classes for HAM10000, PAD-UFES-20, and synthetic data.
+"""PyTorch Dataset classes for HAM10000 and PAD-UFES-20.
 
 Provides a unified interface. All return {image, label, image_id, abcd_targets} dicts.
 """
@@ -13,7 +13,11 @@ import torch
 from torch.utils.data import Dataset
 from sklearn.model_selection import StratifiedShuffleSplit
 
-from src.data.transforms import get_train_transforms, get_val_transforms
+from src.data.transforms import (
+    get_domain_transforms,
+    get_train_transforms,
+    get_val_transforms,
+)
 
 
 CLASS_NAMES = ["mel", "nv", "bcc", "akiec", "bkl", "df", "vasc"]
@@ -43,10 +47,17 @@ class LesionDataset(Dataset):
         img_size: Image size (default 224).
     """
 
-    def __init__(self, df: pd.DataFrame, transform=None, img_size: int = 224):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        transform=None,
+        img_size: int = 224,
+        strong_transform=None,
+    ):
         self.df = df.reset_index(drop=True)
         self.transform = transform
         self.img_size = img_size
+        self.strong_transform = strong_transform
 
     def __len__(self):
         return len(self.df)
@@ -62,14 +73,14 @@ class LesionDataset(Dataset):
         if image is None:
             raise ValueError(f"Failed to read image: {img_path}")
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        if image.shape[:2] != (self.img_size, self.img_size):
-            image = cv2.resize(image, (self.img_size, self.img_size))
 
-        if self.transform:
-            augmented = self.transform(image=image)
-            image_tensor = augmented["image"]
-        else:
-            image_tensor = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+        def apply_transform(transform):
+            if transform:
+                return transform(image=image)["image"]
+            resized = cv2.resize(image, (self.img_size, self.img_size))
+            return torch.from_numpy(resized).permute(2, 0, 1).float() / 255.0
+
+        image_tensor = apply_transform(self.transform)
 
         label = torch.tensor(int(row["class_idx"]), dtype=torch.long)
 
@@ -78,6 +89,10 @@ class LesionDataset(Dataset):
             "label": label,
             "image_id": str(row.get("image_id", f"img_{idx}")),
         }
+
+        if self.strong_transform is not None:
+            out["image_weak"] = image_tensor
+            out["image_strong"] = apply_transform(self.strong_transform)
 
         has_abcd = all(k in self.df.columns for k in ABCD_KEYS)
         if has_abcd:
@@ -90,16 +105,16 @@ class LesionDataset(Dataset):
         return out
 
 
-def load_synthetic_dataset(
+def load_labeled_dataset(
     data_dir: str,
     mode: str = "train",
     train_split: float = 0.7,
     val_split: float = 0.15,
     img_size: int = 224,
     seed: int = 42,
-    img_size: int = 224,
+    augmentation_cfg: dict | None = None,
 ) -> Dataset:
-    """Load the synthetic or HAM10000 dataset with stratified split.
+    """Load a generic labels.csv dataset with a stratified split.
 
     Works for any dataset that has a labels.csv with columns:
     [image_id, class_name, class_idx, image_path].
@@ -139,7 +154,7 @@ def load_synthetic_dataset(
 
     if mode == "train":
         split_df = pd.concat(train_dfs).sample(frac=1, random_state=seed)
-        transform = get_train_transforms(img_size=img_size)
+        transform = get_train_transforms(cfg=augmentation_cfg, img_size=img_size)
     elif mode == "val":
         split_df = pd.concat(val_dfs).sample(frac=1, random_state=seed)
         transform = get_val_transforms(img_size=img_size)
@@ -163,6 +178,7 @@ def load_ham10000_dataset(
     val_split: float = 0.15,
     img_size: int = 224,
     seed: int = 42,
+    augmentation_cfg: dict | None = None,
 ) -> Dataset:
     """Load the HAM10000 dataset with lesion-level stratified split.
 
@@ -266,7 +282,7 @@ def load_ham10000_dataset(
 
     if mode == "train":
         split_df = full_df[full_df["lesion_id"].isin(train_lesions)].copy()
-        transform = get_train_transforms(img_size=img_size)
+        transform = get_train_transforms(cfg=augmentation_cfg, img_size=img_size)
     elif mode == "val":
         split_df = full_df[full_df["lesion_id"].isin(val_lesions)].copy()
         transform = get_val_transforms(img_size=img_size)
@@ -291,10 +307,15 @@ def load_ham10000_dataset(
           f"val={val_lesion_count} ({len(full_df[full_df['lesion_id'].isin(val_lesions)])} imgs), "
           f"test={test_lesion_count} ({len(full_df[full_df['lesion_id'].isin(test_lesions)])} imgs)")
 
-    return LesionDataset(split_df, transform=transform)
+    return LesionDataset(split_df, transform=transform, img_size=img_size)
 
 
-def load_pad_ufes20_dataset(data_dir: str, img_size: int = 224) -> Dataset:
+def load_pad_ufes20_dataset(
+    data_dir: str,
+    img_size: int = 224,
+    augmentation_cfg: dict | None = None,
+    return_views: bool = False,
+) -> Dataset:
     """Load the PAD-UFES-20 dataset for cross-domain evaluation.
 
     Maps PAD-UFES-20 diagnostic classes to HAM10000 classes:
@@ -353,6 +374,17 @@ def load_pad_ufes20_dataset(data_dir: str, img_size: int = 224) -> Dataset:
         print(f"  Skipped {skipped} samples (missing image or unmapped class)")
 
     result_df = pd.DataFrame(rows)
+    if return_views:
+        weak_transform, strong_transform = get_domain_transforms(
+            cfg=augmentation_cfg, img_size=img_size
+        )
+        return LesionDataset(
+            result_df,
+            transform=weak_transform,
+            strong_transform=strong_transform,
+            img_size=img_size,
+        )
+
     transform = get_val_transforms(img_size=img_size)
     return LesionDataset(result_df, transform=transform, img_size=img_size)
 
@@ -360,11 +392,11 @@ def load_pad_ufes20_dataset(data_dir: str, img_size: int = 224) -> Dataset:
 def detect_dataset_type(data_dir: str) -> str:
     """Detect the dataset type from the directory structure.
 
-    Returns: 'synthetic', 'ham10000', 'pad_ufes20', or 'unknown'.
+    Returns: 'labeled', 'ham10000', 'pad_ufes20', or 'unknown'.
     """
     data_path = Path(data_dir)
     if (data_path / "labels.csv").exists():
-        return "synthetic"
+        return "labeled"
     if (data_path / "metadata.csv").exists() and (data_path / "images").exists():
         return "pad_ufes20"
     if (data_path / "HAM10000_metadata.csv").exists():
@@ -374,7 +406,8 @@ def detect_dataset_type(data_dir: str) -> str:
 
 def load_dataset(data_dir: str, mode: str = "test", img_size: int = 224,
                  train_split: float = 0.7, val_split: float = 0.15,
-                 seed: int = 42) -> Dataset:
+                 seed: int = 42, augmentation_cfg: dict | None = None,
+                 return_views: bool = False) -> Dataset:
     """Auto-detect dataset type and load the appropriate dataset.
 
     Args:
@@ -389,13 +422,24 @@ def load_dataset(data_dir: str, mode: str = "test", img_size: int = 224,
     """
     dtype = detect_dataset_type(data_dir)
     if dtype == "pad_ufes20":
-        return load_pad_ufes20_dataset(data_dir, img_size=img_size)
+        return load_pad_ufes20_dataset(
+            data_dir,
+            img_size=img_size,
+            augmentation_cfg=augmentation_cfg,
+            return_views=return_views,
+        )
     elif dtype == "ham10000":
         return load_ham10000_dataset(data_dir, mode=mode, train_split=train_split,
-                                      val_split=val_split, img_size=img_size, seed=seed)
-    else:
-        return load_synthetic_dataset(data_dir, mode=mode, train_split=train_split,
-                                       val_split=val_split, img_size=img_size, seed=seed)
+                                      val_split=val_split, img_size=img_size, seed=seed,
+                                      augmentation_cfg=augmentation_cfg)
+    elif dtype == "labeled":
+        return load_labeled_dataset(data_dir, mode=mode, train_split=train_split,
+                                    val_split=val_split, img_size=img_size, seed=seed,
+                                    augmentation_cfg=augmentation_cfg)
+    raise ValueError(
+        f"Could not detect a supported dataset at {data_dir}. "
+        "Expected HAM10000, PAD-UFES-20, or a labels.csv dataset."
+    )
 
 
 def get_dataloader(dataset, batch_size=32, shuffle=True, num_workers=4, sampler=None):

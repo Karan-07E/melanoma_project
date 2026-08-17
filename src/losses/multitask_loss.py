@@ -24,12 +24,16 @@ class MultiTaskLoss(nn.Module):
         alpha2=0.6,
         alpha3=0.7,
         class_weights=None,
+        label_smoothing=0.0,
     ):
         super().__init__()
         self.lambda_concept = lambda_concept
         self.lambda_constraint = lambda_constraint
 
-        self.class_criterion = nn.CrossEntropyLoss(weight=class_weights)
+        self.class_criterion = nn.CrossEntropyLoss(
+            weight=class_weights,
+            label_smoothing=label_smoothing,
+        )
         self.concept_criterion = ConceptLoss(weight=1.0)
         self.constraint_criterion = ConstraintLoss(
             malignant_indices=malignant_indices,
